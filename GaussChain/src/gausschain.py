@@ -165,8 +165,8 @@ def gauge_construct(dataset_input):
 
 def args_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--aggr_method', type=str, default='fedcls',
-                        help='aggregation method: fedcls or fedic')
+    parser.add_argument('--aggr', type=str, default='fedcls',
+                        help='aggregation method: fedcls, fedic, etc.')
     parser.add_argument('--gauss_var', type=float, default=0.01,
                         help='variance of Gaussian noise')
     parser.add_argument('--lr', type=float, default=0.01,

@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
             n_core="$2"
             shift 2
             ;;
-        --aggr_method)
+        --aggr)
             aggr_method="$2"
             shift 2
             ;;
@@ -54,7 +54,7 @@ done
 
 # Run the training
 mpirun --use-hwthread-cpus --mca btl ^openib -np $n_core python src/gausschain_imagenet.py \
-    --aggr_method $aggr_method \
+    --aggr $aggr_method \
     --gauss_var $gauss_var \
     --lr $lr \
     --momentum $momentum \
