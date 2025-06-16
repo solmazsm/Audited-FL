@@ -19,12 +19,12 @@
 ```
 Audited-FL/
 ├── GaussChain/ # Gaussian attack simulation and aggregation logic
-├── FEDIC/ # State-of-the-art robust aggregation method
-├── FedCLS/ # Additional baselines (FedProx, Moon, etc.)
+├── FEDIC/ # Robust aggregation baseline (ICLR'23)
+├── FedCLS/ # Additional baselines and experiment scripts
 ├── run_scripts/ # Shell scripts for experiments
-├── utils.py # Common utilities
+├── utils.py # Utility functions
 ├── requirements.txt # Python dependencies
-└── README.md
+└── README.md # Project documentation
 ```
 
 
