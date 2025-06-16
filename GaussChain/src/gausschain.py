@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 # Python version: 3.6
 
-from distutils.log import debug
+import logging
+logging.basicConfig(level=logging.DEBUG)
+debug = logging.debug
+
 import inspect
 from threading import local
 from cassandra.cluster import Cluster
@@ -19,17 +22,20 @@ from tqdm import tqdm
 
 import torch
 from tensorboardX import SummaryWriter
-
-from lib_fl.options import args_parser
+import torch.nn as nn
+import torch.optim as optim
+from Dataset.ImageNet_LT_dataloader import ImageNetLTDataLoader
+from lib_fl.models import modelC, MobileNetV3Small, CNNMnist, CNNCifar, MLP
+from lib_fl.utils import average_weights, get_dataset
 from lib_fl.update import LocalUpdate, test_inference
-from lib_fl.models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
-from lib_fl.utils import get_dataset, average_weights, exp_details
+# from some_module import get_dataset  # TODO: Replace with actual module if available
 
 ## HPDIC
 from random import randrange
 import datetime
 import tenseal as ts
 import hashlib
+import argparse
 
 #####################
 ## Inc HE function ##
@@ -157,7 +163,188 @@ def gauge_construct(dataset_input):
 
     return res
 
+def args_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--aggr_method', type=str, default='fedcls',
+                        help='aggregation method: fedcls or fedic')
+    parser.add_argument('--gauss_var', type=float, default=0.01,
+                        help='variance of Gaussian noise')
+    parser.add_argument('--lr', type=float, default=0.01,
+                        help='learning rate')
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='SGD momentum')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='weight decay')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='number of epochs')
+    parser.add_argument('--batch_size', type=int, default=32,
+                        help='batch size')
+    parser.add_argument('--gpu', type=int, default=None,
+                        help='GPU ID to use')
+    return parser.parse_args()
+
+class GaussChainImageNet:
+    def __init__(self, args):
+        self.args = args
+        self.device = 'cuda' if args.gpu is not None else 'cpu'
+        
+        # Initialize MPI
+        self.comm = MPI.COMM_WORLD
+        self.rank = self.comm.Get_rank()
+        self.size = self.comm.Get_size()
+        
+        # Initialize dataset
+        self.train_loader = ImageNetLTDataLoader(shuffle=True, training=True)
+        self.test_loader = ImageNetLTDataLoader(shuffle=False, training=False)
+        
+        # Initialize model
+        if hasattr(args, 'model') and args.model == 'mobilenetv3':
+            self.model = MobileNetV3Small(num_classes=1000, pretrained=True).to(self.device)
+        else:
+            self.model = modelC(input_size=3, n_classes=1000).to(self.device)
+        
+        # Initialize optimizer
+        self.optimizer = optim.SGD(self.model.parameters(), 
+                                 lr=args.lr,
+                                 momentum=args.momentum,
+                                 weight_decay=args.weight_decay)
+        
+        # Initialize loss function
+        self.criterion = nn.CrossEntropyLoss()
+        
+        # Initialize aggregation method
+        self.aggr_method = args.aggr_method  # 'fedcls' or 'fedic'
+        
+    def train(self):
+        for epoch in range(self.args.epochs):
+            # Local training
+            local_weights = self._local_training()
+            
+            # Gather weights from all processes
+            all_weights = self.comm.gather(local_weights, root=0)
+            
+            if self.rank == 0:
+                # Global aggregation
+                if self.aggr_method == 'fedcls':
+                    global_weights = self._fedcls_aggregation(all_weights)
+                else:  # fedic
+                    global_weights = self._fedic_aggregation(all_weights)
+                
+                # Broadcast global weights to all processes
+                self.comm.bcast(global_weights, root=0)
+            else:
+                global_weights = None
+                global_weights = self.comm.bcast(global_weights, root=0)
+            
+            # Update global model
+            self.model.load_state_dict(global_weights)
+            
+            # Evaluate
+            if self.rank == 0:
+                test_acc = self._evaluate()
+                print(f'Epoch {epoch}: Test Accuracy = {test_acc:.4f}')
+    
+    def _local_training(self):
+        self.model.train()
+        epoch_loss = []
+        
+        for batch_idx, (images, labels) in enumerate(self.train_loader):
+            images, labels = images.to(self.device), labels.to(self.device)
+            
+            self.optimizer.zero_grad()
+            outputs = self.model(images)
+            loss = self.criterion(outputs, labels)
+            loss.backward()
+            
+            # Add Gaussian noise to gradients
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    noise = torch.randn_like(param.grad) * self.args.gauss_var
+                    param.grad += noise
+            
+            self.optimizer.step()
+            epoch_loss.append(loss.item())
+        
+        return self.model.state_dict()
+    
+    def _fedcls_aggregation(self, all_weights):
+        # FedCLS aggregation with class-balanced weights
+        class_weights = self._compute_class_weights()
+        weighted_weights = []
+        
+        for weights in all_weights:
+            weighted = {}
+            for key in weights.keys():
+                weighted[key] = weights[key] * class_weights
+            weighted_weights.append(weighted)
+            
+        return average_weights(weighted_weights)
+    
+    def _fedic_aggregation(self, all_weights):
+        # FEDIC aggregation with importance sampling
+        importance_weights = self._compute_importance_weights()
+        weighted_weights = []
+        
+        for weights in all_weights:
+            weighted = {}
+            for key in weights.keys():
+                weighted[key] = weights[key] * importance_weights
+            weighted_weights.append(weighted)
+            
+        return average_weights(weighted_weights)
+    
+    def _compute_class_weights(self):
+        # Compute class weights based on class distribution
+        class_counts = torch.zeros(1000)
+        for _, labels in self.train_loader:
+            for label in labels:
+                class_counts[label] += 1
+        
+        class_weights = 1.0 / (class_counts + 1e-6)
+        class_weights = class_weights / class_weights.sum()
+        return class_weights.to(self.device)
+    
+    def _compute_importance_weights(self):
+        # Compute importance weights based on model performance
+        self.model.eval()
+        correct = torch.zeros(1000)
+        total = torch.zeros(1000)
+        
+        with torch.no_grad():
+            for images, labels in self.train_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs = self.model(images)
+                _, predicted = torch.max(outputs.data, 1)
+                
+                for i in range(len(labels)):
+                    label = labels[i]
+                    total[label] += 1
+                    if predicted[i] == label:
+                        correct[label] += 1
+        
+        importance_weights = 1.0 - (correct / (total + 1e-6))
+        importance_weights = importance_weights / importance_weights.sum()
+        return importance_weights.to(self.device)
+    
+    def _evaluate(self):
+        self.model.eval()
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for images, labels in self.test_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs = self.model(images)
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+        
+        return 100 * correct / total
+
 if __name__ == '__main__':
+    args = args_parser()
+    trainer = GaussChainImageNet(args)
+    trainer.train()
 
     # define paths
     # path_project = os.path.abspath('..')
@@ -168,7 +355,6 @@ if __name__ == '__main__':
     mpi_rank = MPI.COMM_WORLD.Get_rank()
     logger = SummaryWriter('/tmp/fl_blockchain/logs/rank' + str(mpi_rank))
 
-    args = args_parser()
     # exp_details(args)
 
     if 0 == mpi_rank:

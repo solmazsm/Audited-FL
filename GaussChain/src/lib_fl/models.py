@@ -4,6 +4,7 @@
 
 from torch import nn
 import torch.nn.functional as F
+from torchvision.models import mobilenet_v3_small
 
 
 class MLP(nn.Module):
@@ -87,7 +88,7 @@ class CNNCifar(nn.Module):
 
 class modelC(nn.Module):
     def __init__(self, input_size, n_classes=10, **kwargs):
-        super(AllConvNet, self).__init__()
+        super(modelC, self).__init__()
         self.conv1 = nn.Conv2d(input_size, 96, 3, padding=1)
         self.conv2 = nn.Conv2d(96, 96, 3, padding=1)
         self.conv3 = nn.Conv2d(96, 96, 3, padding=1, stride=2)
@@ -118,3 +119,13 @@ class modelC(nn.Module):
         pool_out.squeeze_(-1)
         pool_out.squeeze_(-1)
         return pool_out
+
+class MobileNetV3Small(nn.Module):
+    def __init__(self, num_classes=10, pretrained=True):
+        super(MobileNetV3Small, self).__init__()
+        self.model = mobilenet_v3_small(pretrained=pretrained)
+        in_features = self.model.classifier[3].in_features
+        self.model.classifier[3] = nn.Linear(in_features, num_classes)
+
+    def forward(self, x):
+        return self.model(x)
